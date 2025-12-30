@@ -115,12 +115,8 @@ def predict_churn(data: CustomerInput):
         raise HTTPException(status_code=503, detail="Modelo não carregado")
 
     input_dict = data.model_dump()
-    surname = input_dict.pop("Surname")
-    score = input_dict["CreditScore"]
-
     df = pd.DataFrame([input_dict])
 
-    # Feature engineering
     df["Balance_Salary_Ratio"] = df["Balance"] / (df["EstimatedSalary"] + 1)
     df["Age_Tenure"] = df["Age"] * df["Tenure"]
     df["High_Value_Customer"] = (
