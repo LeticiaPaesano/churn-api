@@ -52,19 +52,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="ChurnInsight API",
-    version="1.2.0",
+    version="1.2.1",
     lifespan=lifespan,
 )
 
 # =========================================================
 # UTILS
 # =========================================================
-
-def classificar_faixa_score(score: int) -> str:
-    if score >= 701: return "Excelente"
-    if score >= 501: return "Bom"
-    if score >= 301: return "Regular"
-    return "Baixo"
 
 def gerar_recomendacao(nivel_risco: str) -> str:
     if nivel_risco == "ALTO":
@@ -80,12 +74,10 @@ def calcular_explicabilidade_local(
     feature_names: List[str],
     baseline_proba: float
 ) -> List[str]:
-
     impactos = []
 
     for i, feature in enumerate(feature_names):
         X_mod = X.copy()
-
         X_mod[0, i] = 0
 
         proba_mod = model.predict_proba(X_mod)[0, 1]
@@ -112,6 +104,7 @@ class CustomerInput(BaseModel):
     Balance: float = Field(..., ge=0)
     EstimatedSalary: float = Field(..., ge=0)
 
+
 class PredictionOutput(BaseModel):
     previsao: str
     probabilidade: float
@@ -120,7 +113,7 @@ class PredictionOutput(BaseModel):
     explicabilidade: Optional[List[str]] = None
 
 # =========================================================
-# ENDPOINT PRINCIPAL
+# ENDPOINT
 # =========================================================
 
 @app.post("/previsao", response_model=PredictionOutput)
@@ -131,6 +124,7 @@ def predict_churn(data: CustomerInput):
 
     df = pd.DataFrame([data.model_dump()])
 
+    # Feature engineering
     df["Balance_Salary_Ratio"] = df["Balance"] / (df["EstimatedSalary"] + 1)
     df["Age_Tenure"] = df["Age"] * df["Tenure"]
     df["High_Value_Customer"] = (
@@ -164,10 +158,10 @@ def predict_churn(data: CustomerInput):
     else:
         nivel_risco = "BAIXO"
 
-    explicabilidade = None
+    explicabilidade_output = None
+
     if previsao == "Vai cancelar":
-        explicabilidade_output = explicabilidade
-        explicabilidade = calcular_explicabilidade_local(
+        explicabilidade_output = calcular_explicabilidade_local(
             model=artifacts["model"],
             X=X,
             feature_names=artifacts["columns"],
@@ -180,7 +174,6 @@ def predict_churn(data: CustomerInput):
         nivel_risco=nivel_risco,
         recomendacao=gerar_recomendacao(nivel_risco),
         explicabilidade=explicabilidade_output
-        
     )
 
 # =========================================================
