@@ -94,14 +94,14 @@ def calcular_explicabilidade_local(
     payload: Dict
 ) -> List[str]:
     model = artifacts["model"]
-    coef = model.coef_[0]
+    importances = model.feature_importances_
     features = artifacts["columns"]
 
-    impactos = coef * X_scaled[0]
+    impactos = importances * np.abs(X_scaled[0])
 
     ranking = sorted(
         zip(features, impactos),
-        key=lambda x: abs(x[1]),
+        key=lambda x: x[1],
         reverse=True
     )[:3]
 
@@ -117,8 +117,9 @@ def calcular_explicabilidade_local(
 
     return explicabilidade
 
+
 # =========================================================
-# ENDPOINT /previsao (SÍNCRONO)
+# ENDPOINT /previsao
 # =========================================================
 
 @app.post("/previsao")
@@ -168,7 +169,7 @@ def previsao(payload: Dict):
     }
 
 # =========================================================
-# PROCESSAMENTO EM BACKGROUND (CSV GRANDE)
+# PROCESSAMENTO EM BACKGROUND
 # =========================================================
 
 def processar_csv(job_id: str, input_path: Path):
@@ -196,7 +197,7 @@ def processar_csv(job_id: str, input_path: Path):
         (TMP_DIR / f"{job_id}.error").write_text(str(e))
 
 # =========================================================
-# ENDPOINT CSV ASSÍNCRONO
+# ENDPOINT PREVISÃO EM LOTE
 # =========================================================
 
 @app.post("/previsao-lote")
