@@ -9,13 +9,11 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-
 # =========================================================
 # LOGGING
 # =========================================================
 logging.getLogger("uvicorn.error").setLevel(logging.ERROR)
 logging.getLogger("uvicorn.access").setLevel(logging.ERROR)
-
 
 # =========================================================
 # PATHS / ARTIFACTS
@@ -23,7 +21,6 @@ logging.getLogger("uvicorn.access").setLevel(logging.ERROR)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "models", "model.joblib")
 artifacts: dict = {}
-
 
 # =========================================================
 # LIFESPAN
@@ -52,16 +49,14 @@ async def lifespan(app: FastAPI):
     artifacts.update(loaded)
     yield
 
-
 # =========================================================
 # FASTAPI
 # =========================================================
 app = FastAPI(
     title="ChurnInsight API",
-    version="1.2.1",
+    version="3.1.0",
     lifespan=lifespan
 )
-
 
 # =========================================================
 # UTILS
@@ -130,7 +125,7 @@ def calcular_explicabilidade_local(
 # SCHEMAS
 # =========================================================
 class CustomerInput(BaseModel):
-    CreditScore: int = Field(..., ge=0, le=1000)
+    CreditScore: int = Field(..., ge=350, le=900)
     Geography: Literal["France", "Germany", "Spain"]
     Gender: Literal["Male", "Female"]
     Age: int = Field(..., ge=18, le=92)
@@ -188,15 +183,13 @@ def predict_churn(data: CustomerInput):
     else:
         risco = "BAIXO"
 
-    if risco == "ALTO":
-        previsao = "Alta probabilidade de churn"
-    elif risco == "MÉDIO":
-        previsao = "Risco moderado de churn"
+    if proba >= threshold:
+        previsao = "vai cancelar"
     else:
-        previsao = "Baixo risco de churn"
+        previsao = "vai continuar"
 
     explicabilidade = None
-    if risco in ("ALTO", "MÉDIO"):
+    if risco in ("ALTO"):
         explicabilidade = calcular_explicabilidade_local(
             artifacts["model"],
             X_scaled,
@@ -207,12 +200,11 @@ def predict_churn(data: CustomerInput):
 
     return PredictionOutput(
         previsao=previsao,
-        probabilidade=round(proba * 100, 1),
+        probabilidade = float(f"{proba:.2f}"),
         nivel_risco=risco,
         recomendacao=gerar_recomendacao(risco),
         explicabilidade=explicabilidade
     )
-
 
 # =========================================================
 # HEALTH
