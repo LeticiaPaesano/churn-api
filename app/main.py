@@ -179,7 +179,7 @@ def predict_churn(data: CustomerInput):
     
     threshold = artifacts.get("threshold", 0.5) * 100.0
 
-    if proba >= 50.0:
+    if proba >= 40.0:
         risco = "ALTO"
     elif proba >= 20.0:
         risco = "MÉDIO"
@@ -278,8 +278,8 @@ def root():
         "version": "1.2.1",
         "escala_probabilidade": "0.0 a 99.9 (percentual)",
         "faixas_risco": {
-            "ALTO": "≥ 50.0%",
-            "MÉDIO": "20.0% a 49.9%",
+            "ALTO": "≥ 40.0%",
+            "MÉDIO": "20.0% a 39.9%",
             "BAIXO": "0.0% a 19.9%"
         },
         "endpoints": {
