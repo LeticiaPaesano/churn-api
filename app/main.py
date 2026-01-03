@@ -86,37 +86,69 @@ def preparar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df[artifacts["columns"]]
 
 # =========================================================
+# MAPA DE FEATURES DO MODELO -> CONTRATO DA API
+# =========================================================
+FEATURE_MAP = {
+    "CreditScore": "CreditScore",
+    "Age": "Age",
+    "Tenure": "Tenure",
+    "Balance": "Balance",
+    "EstimatedSalary": "EstimatedSalary",
+
+    # Features derivadas
+    "Age_Tenure": "Age",
+    "Balance_Salary": "Balance",
+
+    # Enums (One-Hot)
+    "Geography_France": "Geography",
+    "Geography_Spain": "Geography",
+    "Geography_Germany": "Geography",
+    "Gender_Male": "Gender",
+    "Gender_Female": "Gender",
+}
+
+
+# =========================================================
 # EXPLICABILIDADE LOCAL (TOP 3)
 # =========================================================
 
 def calcular_explicabilidade_local(
     X_scaled: np.ndarray,
     payload: Dict
-) -> List[str]:
+) -> list[str]:
     model = artifacts["model"]
-    importances = model.feature_importances_
     features = artifacts["columns"]
+    importances = model.feature_importances_
 
     impactos = importances * np.abs(X_scaled[0])
 
+    impacto_por_contrato = {}
+
+    for feature, impacto in zip(features, impactos):
+        campo = FEATURE_MAP.get(feature)
+
+        if not campo:
+            continue
+
+        impacto_por_contrato[campo] = (
+            impacto_por_contrato.get(campo, 0) + impacto
+        )
+
     ranking = sorted(
-        zip(features, impactos),
+        impacto_por_contrato.items(),
         key=lambda x: x[1],
         reverse=True
     )[:3]
 
     explicabilidade = []
 
-    for feature, _ in ranking:
-        if feature.startswith("Geography_"):
-            explicabilidade.append(payload["Geography"])
-        elif feature.startswith("Gender_"):
-            explicabilidade.append(payload["Gender"])
+    for campo, _ in ranking:
+        if campo in ("Geography", "Gender"):
+            explicabilidade.append(payload[campo])
         else:
-            explicabilidade.append(feature)
+            explicabilidade.append(campo)
 
     return explicabilidade
-
 
 # =========================================================
 # ENDPOINT /previsao
