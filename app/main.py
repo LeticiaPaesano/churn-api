@@ -45,8 +45,11 @@ def load_artifacts():
     global artifacts
 
     path = Path("model/model.joblib")
+
     if not path.exists():
-        raise RuntimeError("Artefato do modelo não encontrado")
+        artifacts = {}
+        print("⚠️ Modelo não encontrado — API iniciada sem modelo")
+        return
 
     artifacts = joblib.load(path)
 
@@ -60,7 +63,8 @@ def load_artifacts():
     }
 
     if not required_keys.issubset(artifacts.keys()):
-        raise RuntimeError("Artefatos incompletos")
+        artifacts = {}
+        print("⚠️ Artefatos incompletos — API iniciada sem modelo")
 
 
 # =========================
@@ -75,7 +79,7 @@ def gerar_recomendacao(risco: str) -> str:
     return "Nenhuma ação necessária no momento"
 
 
-def calcular_explicabilidade_local(model, X, columns, proba, input_dict):
+def calcular_explicabilidade_local(model, X, columns):
     import shap
     explainer = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(X)[1]
@@ -84,12 +88,22 @@ def calcular_explicabilidade_local(model, X, columns, proba, input_dict):
     return [columns[i] for i in top_idx]
 
 
+def garantir_modelo_carregado():
+    if not artifacts:
+        raise HTTPException(
+            status_code=503,
+            detail="Modelo não carregado"
+        )
+
+
 # =========================
 # ENDPOINT PREVISAO
 # =========================
 
 @app.post("/previsao", response_model=PredictionOutput)
 def predict_churn(data: CustomerInput):
+
+    garantir_modelo_carregado()
 
     df = pd.DataFrame([data.model_dump()])
 
@@ -101,8 +115,8 @@ def predict_churn(data: CustomerInput):
     df["Age_Tenure"] = df["Age"] * df["Tenure"]
 
     df["High_Value_Customer"] = int(
-        df["Balance"].iloc[0] > artifacts["balance_median"] and
-        df["EstimatedSalary"].iloc[0] > artifacts["salary_median"]
+        df["Balance"].iloc[0] > artifacts["balance_median"]
+        and df["EstimatedSalary"].iloc[0] > artifacts["salary_median"]
     )
 
     for col in artifacts["columns"]:
@@ -125,15 +139,15 @@ def predict_churn(data: CustomerInput):
         risco = "BAIXO"
         previsao = "Vai Ficar"
 
-    explicabilidade = None
-    if risco == "ALTO":
-        explicabilidade = calcular_explicabilidade_local(
+    explicabilidade = (
+        calcular_explicabilidade_local(
             artifacts["model"],
             X_scaled,
-            artifacts["columns"],
-            proba,
-            data.model_dump()
+            artifacts["columns"]
         )
+        if risco == "ALTO"
+        else None
+    )
 
     return PredictionOutput(
         previsao=previsao,
@@ -145,7 +159,7 @@ def predict_churn(data: CustomerInput):
 
 
 # =========================
-# PROCESSAMENTO EM BACKGROUND
+# BACKGROUND CSV
 # =========================
 
 def processar_csv_lote(contents: bytes, filename: str, job_id: str):
@@ -160,8 +174,8 @@ def processar_csv_lote(contents: bytes, filename: str, job_id: str):
     df["Age_Tenure"] = df["Age"] * df["Tenure"]
 
     df["High_Value_Customer"] = (
-        (df["Balance"] > artifacts["balance_median"]) &
-        (df["EstimatedSalary"] > artifacts["salary_median"])
+        (df["Balance"] > artifacts["balance_median"])
+        & (df["EstimatedSalary"] > artifacts["salary_median"])
     ).astype(int)
 
     for col in artifacts["columns"]:
@@ -181,24 +195,22 @@ def processar_csv_lote(contents: bytes, filename: str, job_id: str):
     )
     df["previsao"] = np.where(probas >= threshold, "Vai Sair", "Vai Ficar")
 
-    explicabilidades = []
+    explic = []
     for i, risco in enumerate(df["nivel_risco"]):
         if risco == "ALTO":
-            explicabilidades.append(
+            explic.append(
                 "|".join(
                     calcular_explicabilidade_local(
                         artifacts["model"],
                         X_scaled[i:i+1],
-                        artifacts["columns"],
-                        probas[i],
-                        df.iloc[i].to_dict()
+                        artifacts["columns"]
                     )
                 )
             )
         else:
-            explicabilidades.append(None)
+            explic.append(None)
 
-    df["explicabilidade"] = explicabilidades
+    df["explicabilidade"] = explic
 
     output = Path(tempfile.gettempdir()) / filename.replace(".csv", "_previsionado.csv")
     df.to_csv(output, index=False)
@@ -211,7 +223,7 @@ def processar_csv_lote(contents: bytes, filename: str, job_id: str):
 
 
 # =========================
-# ENDPOINT PREVISAO LOTE 
+# ENDPOINT PREVISAO LOTE
 # =========================
 
 @app.post("/previsao-lote")
@@ -220,13 +232,10 @@ async def previsao_lote(
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
 
-    job_id = str(uuid4())
+    garantir_modelo_carregado()
 
-    jobs[job_id] = {
-        "status": "PROCESSANDO",
-        "progress": 0,
-        "output": None
-    }
+    job_id = str(uuid4())
+    jobs[job_id] = {"status": "PROCESSANDO", "progress": 0, "output": None}
 
     contents = await file.read()
 
@@ -237,14 +246,11 @@ async def previsao_lote(
         job_id
     )
 
-    return {
-        "job_id": job_id,
-        "status": "PROCESSANDO"
-    }
+    return {"job_id": job_id}
 
 
 # =========================
-# ENDPOINT STATUS
+# STATUS
 # =========================
 
 @app.get("/status/{job_id}")
@@ -255,7 +261,7 @@ def status(job_id: str):
 
 
 # =========================
-# ENDPOINT DOWNLOAD
+# DOWNLOAD
 # =========================
 
 @app.get("/download/{job_id}")
@@ -271,34 +277,14 @@ def download(job_id: str):
         filename=Path(job["output"]).name
     )
 
+
 # =========================
-# ENDPOINT HEALTH CHECK
+# HEALTH
 # =========================
+
 @app.get("/health")
-def health_check():
-    try:
-        if not artifacts:
-            return {
-                "status": "DOWN",
-                "model_loaded": False
-            }
-
-        dummy = pd.DataFrame(
-            [[0] * len(artifacts["columns"])],
-            columns=artifacts["columns"]
-        )
-
-        artifacts["scaler"].transform(dummy)
-        artifacts["model"].predict_proba(dummy)
-
-        return {
-            "status": "UP",
-            "model_loaded": True
-        }
-
-    except Exception as e:
-        return {
-            "status": "DOWN",
-            "model_loaded": False,
-            "error": str(e)
-        }
+def health():
+    return {
+        "status": "UP",
+        "model_loaded": bool(artifacts)
+    }
