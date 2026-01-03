@@ -1,141 +1,31 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
-from contextlib import asynccontextmanager
-from typing import Literal, Optional, List
+from pydantic import BaseModel
 from pathlib import Path
-
-import os
-import logging
-import joblib
+from uuid import uuid4
 import pandas as pd
 import numpy as np
+import joblib
 import tempfile
+import io
 
+app = FastAPI(title="Churn Prediction API")
 
-# =========================================================
-# LOGGING
-# =========================================================
-logging.getLogger("uvicorn.error").setLevel(logging.ERROR)
-logging.getLogger("uvicorn.access").setLevel(logging.ERROR)
+artifacts = {}
+jobs = {}
 
-# =========================================================
-# PATHS / ARTIFACTS
-# =========================================================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "models", "model.joblib")
-artifacts: dict = {}
+# =========================
+# MODELS
+# =========================
 
-# =========================================================
-# LIFESPAN
-# =========================================================
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    if not os.path.exists(MODEL_PATH):
-        raise RuntimeError(f"Modelo não encontrado em {MODEL_PATH}")
-
-    loaded = joblib.load(MODEL_PATH)
-
-    required_keys = {
-        "model",
-        "scaler",
-        "columns",
-        "threshold_cost",
-        "balance_median",
-        "salary_median",
-        "model_version"
-    }
-
-    missing = required_keys - set(loaded.keys())
-    if missing:
-        raise RuntimeError(f"Artefato inválido. Chaves ausentes: {missing}")
-
-    artifacts.update(loaded)
-    yield
-
-# =========================================================
-# FASTAPI
-# =========================================================
-app = FastAPI(
-    title="ChurnInsight API",
-    version="3.1.0",
-    lifespan=lifespan
-)
-
-# =========================================================
-# UTILS
-# =========================================================
-def gerar_recomendacao(nivel_risco: str) -> str:
-    mapa = {
-        "ALTO": "Ação imediata recomendada: contato ativo e oferta personalizada",
-        "MÉDIO": "Monitoramento recomendado e campanhas de retenção",
-        "BAIXO": "Cliente estável - manutenção padrão"
-    }
-    return mapa.get(nivel_risco, "Manutenção padrão")
-
-
-def calcular_explicabilidade_local(
-    model,
-    X: np.ndarray,
-    feature_names: List[str],
-    baseline_proba: float,
-    input_data: dict
-) -> List[str]:
-
-    mapeamento = {
-        "CreditScore": "CreditScore",
-        "Age": "Age",
-        "Tenure": "Tenure",
-        "Balance": "Balance",
-        "EstimatedSalary": "EstimatedSalary",
-        "Geography_Germany": "Geography",
-        "Geography_Spain": "Geography",
-        "Gender_Male": "Gender",
-        "Balance_Salary_Ratio": "Balance",
-        "Age_Tenure": "Age",
-        "High_Value_Customer": "Balance"
-    }
-
-    impactos = []
-    for i, feature in enumerate(feature_names):
-        X_mod = X.copy()
-        X_mod[0, i] = 0
-        proba_mod = model.predict_proba(X_mod)[0, 1]
-        impactos.append((feature, abs(baseline_proba - proba_mod)))
-
-    impactos = sorted(impactos, key=lambda x: x[1], reverse=True)
-
-    features_saida = []
-    for feat, _ in impactos:
-        contrato = mapeamento.get(feat)
-        if not contrato:
-            continue
-
-        if contrato in ("Geography", "Gender"):
-            valor = input_data.get(contrato)
-            if valor and valor not in features_saida:
-                features_saida.append(valor)
-        else:
-            if contrato not in features_saida:
-                features_saida.append(contrato)
-
-        if len(features_saida) == 3:
-            break
-
-    return features_saida
-
-
-# =========================================================
-# SCHEMAS
-# =========================================================
 class CustomerInput(BaseModel):
-    CreditScore: int = Field(..., ge=350, le=900)
-    Geography: Literal["France", "Germany", "Spain"]
-    Gender: Literal["Male", "Female"]
-    Age: int = Field(..., ge=18, le=92)
-    Tenure: int = Field(..., ge=0, le=10)
-    Balance: float = Field(..., ge=0)
-    EstimatedSalary: float = Field(..., ge=0)
+    CreditScore: int
+    Geography: str
+    Gender: str
+    Age: int
+    Tenure: int
+    Balance: float
+    EstimatedSalary: float
 
 
 class PredictionOutput(BaseModel):
@@ -143,24 +33,128 @@ class PredictionOutput(BaseModel):
     probabilidade: float
     nivel_risco: str
     recomendacao: str
-    explicabilidade: Optional[List[str]] = None
+    explicabilidade: list | None
 
 
-# =========================================================
+# =========================
+# STARTUP
+# =========================
+
+@app.on_event("startup")
+def load_artifacts():
+    global artifacts
+
+    path = Path("model/model.joblib")
+    if not path.exists():
+        raise RuntimeError("Artefato do modelo não encontrado")
+
+    artifacts = joblib.load(path)
+
+    required_keys = {
+        "model",
+        "scaler",
+        "columns",
+        "threshold_cost",
+        "balance_median",
+        "salary_median"
+    }
+
+    if not required_keys.issubset(artifacts.keys()):
+        raise RuntimeError("Artefatos incompletos")
+
+
+# =========================
+# UTILS
+# =========================
+
+def gerar_recomendacao(risco: str) -> str:
+    if risco == "ALTO":
+        return "Ação imediata recomendada: contato ativo e oferta personalizada"
+    if risco == "MÉDIO":
+        return "Monitorar cliente e avaliar oferta preventiva"
+    return "Nenhuma ação necessária no momento"
+
+
+def calcular_explicabilidade_local(model, X, columns, proba, input_dict):
+    import shap
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(X)[1]
+    impact = np.abs(shap_values[0])
+    top_idx = np.argsort(impact)[-3:]
+    return [columns[i] for i in top_idx]
+
+
+# =========================
 # ENDPOINT PREVISAO
-# =========================================================
+# =========================
+
 @app.post("/previsao", response_model=PredictionOutput)
 def predict_churn(data: CustomerInput):
 
-    if not artifacts:
-        raise HTTPException(status_code=503, detail="Modelo não carregado")
-
-    input_dict = data.model_dump()
-    df = pd.DataFrame([input_dict])
+    df = pd.DataFrame([data.model_dump()])
 
     df["Geography_Germany"] = int(data.Geography == "Germany")
     df["Geography_Spain"] = int(data.Geography == "Spain")
     df["Gender_Male"] = int(data.Gender == "Male")
+
+    df["Balance_Salary_Ratio"] = df["Balance"] / (df["EstimatedSalary"] + 1)
+    df["Age_Tenure"] = df["Age"] * df["Tenure"]
+
+    df["High_Value_Customer"] = int(
+        df["Balance"].iloc[0] > artifacts["balance_median"] and
+        df["EstimatedSalary"].iloc[0] > artifacts["salary_median"]
+    )
+
+    for col in artifacts["columns"]:
+        if col not in df:
+            df[col] = 0
+
+    X = df[artifacts["columns"]]
+    X_scaled = artifacts["scaler"].transform(X)
+
+    proba = float(artifacts["model"].predict_proba(X_scaled)[0, 1])
+    threshold = artifacts["threshold_cost"]
+
+    if proba >= threshold:
+        risco = "ALTO"
+        previsao = "Vai Sair"
+    elif proba >= 0.20:
+        risco = "MÉDIO"
+        previsao = "Vai Sair"
+    else:
+        risco = "BAIXO"
+        previsao = "Vai Ficar"
+
+    explicabilidade = None
+    if risco == "ALTO":
+        explicabilidade = calcular_explicabilidade_local(
+            artifacts["model"],
+            X_scaled,
+            artifacts["columns"],
+            proba,
+            data.model_dump()
+        )
+
+    return PredictionOutput(
+        previsao=previsao,
+        probabilidade=float(f"{proba:.2f}"),
+        nivel_risco=risco,
+        recomendacao=gerar_recomendacao(risco),
+        explicabilidade=explicabilidade
+    )
+
+
+# =========================
+# PROCESSAMENTO EM BACKGROUND
+# =========================
+
+def processar_csv_lote(contents: bytes, filename: str, job_id: str):
+
+    df = pd.read_csv(io.BytesIO(contents))
+
+    df["Geography_Germany"] = (df["Geography"] == "Germany").astype(int)
+    df["Geography_Spain"] = (df["Geography"] == "Spain").astype(int)
+    df["Gender_Male"] = (df["Gender"] == "Male").astype(int)
 
     df["Balance_Salary_Ratio"] = df["Balance"] / (df["EstimatedSalary"] + 1)
     df["Age_Tenure"] = df["Age"] * df["Tenure"]
@@ -174,151 +168,137 @@ def predict_churn(data: CustomerInput):
         if col not in df:
             df[col] = 0
 
-    df = df[artifacts["columns"]]
-    X_scaled = artifacts["scaler"].transform(df)
+    X = df[artifacts["columns"]]
+    X_scaled = artifacts["scaler"].transform(X)
 
-    proba = float(artifacts["model"].predict_proba(X_scaled)[0, 1])
+    probas = artifacts["model"].predict_proba(X_scaled)[:, 1]
     threshold = artifacts["threshold_cost"]
 
-    if proba >= threshold:
-        risco = "ALTO"
-    elif proba >= 0.6 * threshold:
-        risco = "MÉDIO"
-    else:
-        risco = "BAIXO"
-
-    if proba >= threshold:
-        previsao = "vai cancelar"
-    else:
-        previsao = "vai continuar"
-
-    explicabilidade = None
-    if risco in ("ALTO"):
-        explicabilidade = calcular_explicabilidade_local(
-            artifacts["model"],
-            X_scaled,
-            artifacts["columns"],
-            proba,
-            input_dict
-        )
-
-    return PredictionOutput(
-        previsao=previsao,
-        probabilidade = float(f"{proba:.2f}"),
-        nivel_risco=risco,
-        recomendacao=gerar_recomendacao(risco),
-        explicabilidade=explicabilidade
+    df["probabilidade"] = np.round(probas, 2)
+    df["nivel_risco"] = np.where(
+        probas >= threshold, "ALTO",
+        np.where(probas >= 0.20, "MÉDIO", "BAIXO")
     )
+    df["previsao"] = np.where(probas >= threshold, "Vai Sair", "Vai Ficar")
 
-# =========================================================
-# ENDPOINT PREVISAO LOTE
-# =========================================================
+    explicabilidades = []
+    for i, risco in enumerate(df["nivel_risco"]):
+        if risco == "ALTO":
+            explicabilidades.append(
+                "|".join(
+                    calcular_explicabilidade_local(
+                        artifacts["model"],
+                        X_scaled[i:i+1],
+                        artifacts["columns"],
+                        probas[i],
+                        df.iloc[i].to_dict()
+                    )
+                )
+            )
+        else:
+            explicabilidades.append(None)
+
+    df["explicabilidade"] = explicabilidades
+
+    output = Path(tempfile.gettempdir()) / filename.replace(".csv", "_previsionado.csv")
+    df.to_csv(output, index=False)
+
+    jobs[job_id] = {
+        "status": "FINALIZADO",
+        "progress": 100,
+        "output": str(output)
+    }
+
+
+# =========================
+# ENDPOINT PREVISAO LOTE 
+# =========================
+
 @app.post("/previsao-lote")
-async def previsao_lote(file: UploadFile = File(...)):
+async def previsao_lote(
+    file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
 
-    if not artifacts:
-        raise HTTPException(status_code=503, detail="Modelo não carregado")
+    job_id = str(uuid4())
 
-    if not file.filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Arquivo deve ser CSV")
-
-    import io
+    jobs[job_id] = {
+        "status": "PROCESSANDO",
+        "progress": 0,
+        "output": None
+    }
 
     contents = await file.read()
-    df = pd.read_csv(io.BytesIO(contents))
 
-    colunas_necessarias = [
-        "CreditScore", "Geography", "Gender",
-        "Age", "Tenure", "Balance", "EstimatedSalary"
-    ]
-
-    faltantes = set(colunas_necessarias) - set(df.columns)
-    if faltantes:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Colunas ausentes: {list(faltantes)}"
-        )
-
-    threshold = artifacts["threshold_cost"]
-    resultados = []
-
-    for _, row in df.iterrows():
-
-        input_dict = row.to_dict()
-        df_linha = pd.DataFrame([input_dict])
-
-        df_linha["Geography_Germany"] = int(row["Geography"] == "Germany")
-        df_linha["Geography_Spain"] = int(row["Geography"] == "Spain")
-        df_linha["Gender_Male"] = int(row["Gender"] == "Male")
-
-        df_linha["Balance_Salary_Ratio"] = row["Balance"] / (row["EstimatedSalary"] + 1)
-        df_linha["Age_Tenure"] = row["Age"] * row["Tenure"]
-
-        df_linha["High_Value_Customer"] = int(
-            row["Balance"] > artifacts["balance_median"] and
-            row["EstimatedSalary"] > artifacts["salary_median"]
-        )
-
-        for col in artifacts["columns"]:
-            if col not in df_linha:
-                df_linha[col] = 0
-
-        df_linha = df_linha[artifacts["columns"]]
-        X_scaled = artifacts["scaler"].transform(df_linha)
-
-        proba = float(artifacts["model"].predict_proba(X_scaled)[0, 1])
-
-        if proba >= threshold:
-            risco = "ALTO"
-            previsao = "Vai Sair"
-        elif proba >= 0.20:
-            risco = "MÉDIO"
-            previsao = "Vai Sair"
-        else:
-            risco = "BAIXO"
-            previsao = "Vai Ficar"
-
-        explicabilidade = None
-        if risco == "ALTO":
-            explicabilidade = calcular_explicabilidade_local(
-                artifacts["model"],
-                X_scaled,
-                artifacts["columns"],
-                proba,
-                input_dict
-            )
-
-        resultados.append({
-            **row.to_dict(),
-            "previsao": previsao,
-            "probabilidade": float(f"{proba:.2f}"),
-            "nivel_risco": risco,
-            "explicabilidade": "|".join(explicabilidade) if explicabilidade else None
-        })
-
-    df_resultado = pd.DataFrame(resultados)
-
-    nome_saida = file.filename.replace(".csv", "_previsionado.csv")
-    output_path = Path(tempfile.gettempdir()) / nome_saida
-    df_resultado.to_csv(output_path, index=False)
-
-    return FileResponse(
-        output_path,
-        media_type="text/csv",
-        filename=nome_saida
+    background_tasks.add_task(
+        processar_csv_lote,
+        contents,
+        file.filename,
+        job_id
     )
 
-
-# =========================================================
-# HEALTH
-# =========================================================
-@app.get("/health")
-def health():
     return {
-        "status": "UP",
-        "model_version": artifacts.get("model_version"),
-        "threshold_cost": artifacts.get("threshold_cost"),
-        "features_count": artifacts.get("features_count"),
-        "trained_at": artifacts.get("trained_at"),
-        "sklearn_version": artifacts.get("sklearn_version")
+        "job_id": job_id,
+        "status": "PROCESSANDO"
     }
+
+
+# =========================
+# ENDPOINT STATUS
+# =========================
+
+@app.get("/status/{job_id}")
+def status(job_id: str):
+    if job_id not in jobs:
+        raise HTTPException(404, "Job não encontrado")
+    return jobs[job_id]
+
+
+# =========================
+# ENDPOINT DOWNLOAD
+# =========================
+
+@app.get("/download/{job_id}")
+def download(job_id: str):
+    job = jobs.get(job_id)
+
+    if not job or job["status"] != "FINALIZADO":
+        raise HTTPException(404, "Arquivo não disponível")
+
+    return FileResponse(
+        job["output"],
+        media_type="text/csv",
+        filename=Path(job["output"]).name
+    )
+
+# =========================
+# ENDPOINT HEALTH CHECK
+# =========================
+@app.get("/health")
+def health_check():
+    try:
+        if not artifacts:
+            return {
+                "status": "DOWN",
+                "model_loaded": False
+            }
+
+        dummy = pd.DataFrame(
+            [[0] * len(artifacts["columns"])],
+            columns=artifacts["columns"]
+        )
+
+        artifacts["scaler"].transform(dummy)
+        artifacts["model"].predict_proba(dummy)
+
+        return {
+            "status": "UP",
+            "model_loaded": True
+        }
+
+    except Exception as e:
+        return {
+            "status": "DOWN",
+            "model_loaded": False,
+            "error": str(e)
+        }
