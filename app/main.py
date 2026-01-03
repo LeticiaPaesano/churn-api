@@ -162,13 +162,24 @@ def previsao_lote(file: UploadFile = File(...)):
 
     df = pd.read_csv(file.file)
 
-    colunas_necessarias = artifacts["raw_columns"]
+    colunas_necessarias = [
+    "CreditScore",
+    "Geography",
+    "Gender",
+    "Age",
+    "Tenure",
+    "Balance",
+    "EstimatedSalary"
+]
+
     faltantes = set(colunas_necessarias) - set(df.columns)
+    
     if faltantes:
         raise HTTPException(
-            status_code=400,
-            detail=f"Colunas ausentes: {list(faltantes)}"
-        )
+        status_code=400,
+        detail=f"Colunas ausentes no CSV: {list(faltantes)}"
+    )
+
 
     df_proc = preparar_dataframe(df.copy())
     X_scaled = artifacts["scaler"].transform(df_proc)
