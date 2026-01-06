@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import Dict, List
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse, Response
 
 import uuid
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 # =========================================================
-# CONFIG
+# CONFIGURAÇÃO
 # =========================================================
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -22,7 +22,11 @@ TMP_DIR = Path(tempfile.gettempdir())
 # APP
 # =========================================================
 
-app = FastAPI(title="Churn API", version="2.0.0")
+app = FastAPI(
+    title="Churn API",
+    version="2.1.0",
+    description="API de previsão de churn"
+)
 
 artifacts: Dict = {}
 
@@ -47,7 +51,7 @@ def load_artifacts():
     print("✅ Modelo carregado com sucesso")
 
 # =========================================================
-# ENDPOINT / e /HEAD
+# ENDPOINT ROOT
 # =========================================================
 
 @app.get("/")
@@ -57,23 +61,24 @@ def root():
         "service": "Churn API",
         "status": "online",
         "model_loaded": bool(artifacts),
-        "version": "2.0.0",
-        "environment": "render"
+        "version": "2.1.0"
     }
-    
+
 # =========================================================
-# ENDPOINT /HEALTH
+# HEALTHCHECK
 # =========================================================
+
 @app.get("/health")
 def health():
     return {
         "status": "ok",
         "model_loaded": bool(artifacts)
     }
-    
+
 # =========================================================
-# ENDPOINT /favicon.ico
+# FAVICON
 # =========================================================
+
 @app.get("/favicon.ico")
 def favicon():
     return Response(status_code=204)
@@ -81,6 +86,7 @@ def favicon():
 # =========================================================
 # PREPARAÇÃO DE DADOS
 # =========================================================
+
 def preparar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = pd.get_dummies(df, columns=["Geography", "Gender"], drop_first=True)
 
@@ -91,8 +97,9 @@ def preparar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df[artifacts["columns"]]
 
 # =========================================================
-# MAPA DE FEATURES DO MODELO -> CONTRATO DA API
+# MAPA DE FEATURES
 # =========================================================
+
 FEATURE_MAP = {
     "CreditScore": "CreditScore",
     "Age": "Age",
@@ -109,23 +116,23 @@ FEATURE_MAP = {
 }
 
 # =========================================================
-# EXPLICABILIDADE LOCAL (TOP 3)
+# EXPLICABILIDADE LOCAL
 # =========================================================
+
 def calcular_explicabilidade_local(
     X_scaled: np.ndarray,
     payload: Dict
-) -> list[str]:
+) -> List[str]:
     model = artifacts["model"]
     features = artifacts["columns"]
     importances = model.feature_importances_
 
     impactos = importances * np.abs(X_scaled[0])
 
-    impacto_por_contrato = {}
+    impacto_por_contrato: Dict[str, float] = {}
 
     for feature, impacto in zip(features, impactos):
         campo = FEATURE_MAP.get(feature)
-
         if not campo:
             continue
 
@@ -139,11 +146,11 @@ def calcular_explicabilidade_local(
         reverse=True
     )[:3]
 
-    explicabilidade = []
+    explicabilidade: List[str] = []
 
     for campo, _ in ranking:
         if campo in ("Geography", "Gender"):
-            explicabilidade.append(payload[campo])
+            explicabilidade.append(str(payload.get(campo)))
         else:
             explicabilidade.append(campo)
 
@@ -152,12 +159,13 @@ def calcular_explicabilidade_local(
 # =========================================================
 # ENDPOINT /PREVISAO
 # =========================================================
+
 @app.post("/previsao")
 def previsao(payload: Dict):
     if not artifacts:
         raise HTTPException(status_code=503, detail="Modelo não carregado")
 
-    colunas = [
+    colunas_esperadas = [
         "CreditScore",
         "Geography",
         "Gender",
@@ -167,7 +175,7 @@ def previsao(payload: Dict):
         "EstimatedSalary",
     ]
 
-    faltantes = set(colunas) - set(payload.keys())
+    faltantes = set(colunas_esperadas) - set(payload.keys())
     if faltantes:
         raise HTTPException(
             status_code=400,
@@ -181,26 +189,22 @@ def previsao(payload: Dict):
     proba = float(artifacts["model"].predict_proba(X_scaled)[0, 1])
     threshold = artifacts["threshold_cost"]
 
-    risco = "ALTO" if proba >= threshold else "BAIXO"
-    previsao = "Vai cancelar" if risco == "ALTO" else "Vai continuar"
+    nivel_risco = "ALTO" if proba >= threshold else "BAIXO"
+    previsao_txt = "Vai cancelar" if nivel_risco == "ALTO" else "Vai continuar"
 
     explicabilidade = calcular_explicabilidade_local(X_scaled, payload)
 
     return {
-        "previsao": previsao,
+        "previsao": previsao_txt,
         "probabilidade": round(proba, 4),
-        "nivel_risco": risco,
-        "recomendacao": (
-            "Ação imediata recomendada: contato ativo e oferta personalizada"
-            if risco == "ALTO"
-            else "Cliente estável"
-        ),
+        "nivel_risco": nivel_risco,
         "explicabilidade": explicabilidade
     }
 
 # =========================================================
-# PROCESSAMENTO EM BACKGROUND
+# PROCESSAMENTO EM LOTE (BACKGROUND)
 # =========================================================
+
 def processar_csv(job_id: str, input_path: Path):
     try:
         df = pd.read_csv(input_path)
@@ -219,6 +223,18 @@ def processar_csv(job_id: str, input_path: Path):
             "Vai continuar"
         )
 
+        explicabilidades: List[str] = []
+
+        for i, row in df.iterrows():
+            payload = row.to_dict()
+            explicacao = calcular_explicabilidade_local(
+                X_scaled[i:i + 1],
+                payload
+            )
+            explicabilidades.append(";".join(explicacao))
+
+        df["explicabilidade"] = explicabilidades
+
         output = TMP_DIR / f"{job_id}_resultado.csv"
         df.to_csv(output, index=False)
 
@@ -228,6 +244,7 @@ def processar_csv(job_id: str, input_path: Path):
 # =========================================================
 # ENDPOINT /PREVISAO-LOTE
 # =========================================================
+
 @app.post("/previsao-lote")
 def previsao_lote(
     file: UploadFile = File(...),
@@ -248,9 +265,11 @@ def previsao_lote(
         "job_id": job_id,
         "status": "PROCESSANDO"
     }
+
 # =========================================================
-# ENDPOINT /PREVISAO-LOTE/STATUS
+# STATUS DO LOTE
 # =========================================================
+
 @app.get("/previsao-lote/status/{job_id}")
 def status_lote(job_id: str):
     if (TMP_DIR / f"{job_id}.error").exists():
@@ -262,8 +281,9 @@ def status_lote(job_id: str):
     return {"status": "PROCESSANDO"}
 
 # =========================================================
-# ENDPOINT /PREVISAO-LOTE/DOWNLOAD
+# DOWNLOAD DO RESULTADO
 # =========================================================
+
 @app.get("/previsao-lote/download/{job_id}")
 def download(job_id: str):
     path = TMP_DIR / f"{job_id}_resultado.csv"
@@ -271,4 +291,8 @@ def download(job_id: str):
     if not path.exists():
         raise HTTPException(status_code=404, detail="Arquivo não disponível")
 
-    return FileResponse(path, filename=path.name, media_type="text/csv")
+    return FileResponse(
+        path,
+        filename=path.name,
+        media_type="text/csv"
+    )
