@@ -147,7 +147,7 @@ def calcular_explicabilidade_local_batch(
     X_scaled: np.ndarray,
     df_original: pd.DataFrame,
     row_idx: int
-) -> list[str]:
+) -> str:
     model = artifacts["model"]
     features = artifacts["columns"]
     importances = model.feature_importances_
@@ -174,7 +174,10 @@ def calcular_explicabilidade_local_batch(
     
     for campo, _ in ranking:
         if campo in ("Geography", "Gender"):
-            explicabilidade.append(str(df_original.iloc[row_idx][campo]))
+            if campo in df_original.columns:
+                explicabilidade.append(str(df_original.iloc[row_idx][campo]))
+            else:
+                explicabilidade.append(campo)
         else:
             explicabilidade.append(campo)
     
@@ -229,6 +232,7 @@ def previsao(payload: Dict):
 def processar_csv(job_id: str, input_path: Path):
     try:
         df = pd.read_csv(input_path)
+        df_original = df.copy()
         df_proc = preparar_dataframe(df)
         X_scaled = artifacts["scaler"].transform(df_proc)
         probs = artifacts["model"].predict_proba(X_scaled)[:, 1]
@@ -242,16 +246,22 @@ def processar_csv(job_id: str, input_path: Path):
             "Vai continuar"
         )
         
-        df["explicabilidade"] = [
-            calcular_explicabilidade_local_batch(X_scaled, df, i)
-            for i in range(len(df))
-        ]
+        explicabilidade_list = []
+        for i in range(len(df)):
+            explicabilidade_list.append(
+                calcular_explicabilidade_local_batch(X_scaled, df_original, i)
+            )
+        
+        df["explicabilidade"] = explicabilidade_list
         
         output = TMP_DIR / f"{job_id}_resultado.csv"
         df.to_csv(output, index=False)
         
     except Exception as e:
-        (TMP_DIR / f"{job_id}.error").write_text(str(e))
+        error_path = TMP_DIR / f"{job_id}.error"
+        with open(error_path, "w") as f:
+            f.write(str(e))
+        print(f"Erro no processamento do job {job_id}: {e}")
 
 # =========================================================
 # ENDPOINT /PREVISAO-LOTE
@@ -282,10 +292,15 @@ def previsao_lote(
 # =========================================================
 @app.get("/previsao-lote/status/{job_id}")
 def status_lote(job_id: str):
-    if (TMP_DIR / f"{job_id}.error").exists():
-        return {"status": "ERRO"}
+    error_path = TMP_DIR / f"{job_id}.error"
+    result_path = TMP_DIR / f"{job_id}_resultado.csv"
     
-    if (TMP_DIR / f"{job_id}_resultado.csv").exists():
+    if error_path.exists():
+        with open(error_path, "r") as f:
+            error_msg = f.read()
+        return {"status": "ERRO", "message": error_msg}
+    
+    if result_path.exists():
         return {"status": "FINALIZADO"}
     
     return {"status": "PROCESSANDO"}
