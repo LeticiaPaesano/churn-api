@@ -141,6 +141,46 @@ def calcular_explicabilidade_local(
     return explicabilidade
 
 # =========================================================
+# EXPLICABILIDADE LOCAL PARA BATCH
+# =========================================================
+def calcular_explicabilidade_local_batch(
+    X_scaled: np.ndarray,
+    df_original: pd.DataFrame,
+    row_idx: int
+) -> list[str]:
+    model = artifacts["model"]
+    features = artifacts["columns"]
+    importances = model.feature_importances_
+    impactos = importances * np.abs(X_scaled[row_idx])
+    
+    impacto_por_contrato = {}
+    
+    for feature, impacto in zip(features, impactos):
+        campo = FEATURE_MAP.get(feature)
+        if not campo:
+            continue
+        
+        impacto_por_contrato[campo] = (
+            impacto_por_contrato.get(campo, 0) + impacto
+        )
+    
+    ranking = sorted(
+        impacto_por_contrato.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )[:3]
+    
+    explicabilidade = []
+    
+    for campo, _ in ranking:
+        if campo in ("Geography", "Gender"):
+            explicabilidade.append(str(df_original.iloc[row_idx][campo]))
+        else:
+            explicabilidade.append(campo)
+    
+    return ", ".join(explicabilidade)
+
+# =========================================================
 # ENDPOINT /PREVISAO
 # =========================================================
 @app.post("/previsao")
@@ -180,11 +220,6 @@ def previsao(payload: Dict):
         "previsao": previsao,
         "probabilidade": round(proba, 4),
         "nivel_risco": risco,
-        "recomendacao": (
-            "Ação imediata recomendada: contato ativo e oferta personalizada"
-            if risco == "ALTO"
-            else "Cliente estável"
-        ),
         "explicabilidade": explicabilidade
     }
 
@@ -206,6 +241,11 @@ def processar_csv(job_id: str, input_path: Path):
             "Vai cancelar",
             "Vai continuar"
         )
+        
+        df["explicabilidade"] = [
+            calcular_explicabilidade_local_batch(X_scaled, df, i)
+            for i in range(len(df))
+        ]
         
         output = TMP_DIR / f"{job_id}_resultado.csv"
         df.to_csv(output, index=False)
