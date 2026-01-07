@@ -186,29 +186,65 @@ def previsao(payload: Dict):
 # =========================================================
 # PROCESSAMENTO EM BACKGROUND
 # =========================================================
+def obter_explicabilidade_vetorizada(X_scaled: np.ndarray, df_original: pd.DataFrame) -> List[str]:
+    """Calcula explicabilidade para múltiplas linhas de forma eficiente."""
+    model = artifacts["model"]
+    features = artifacts["columns"]
+    importances = model.feature_importances_
+    
+    # Impacto = importância * valor absoluto dos dados escalonados
+    impactos = np.abs(X_scaled) * importances
+    nomes_amigaveis = np.array([FEATURE_MAP.get(f, f) for f in features])
+    
+    explicacoes = []
+    for i in range(impactos.shape[0]):
+        # Pega os índices dos 3 maiores impactos
+        top_idx = np.argsort(impactos[i])[-3:][::-1]
+        top_campos = nomes_amigaveis[top_idx]
+        
+        # Ajuste para Geography/Gender retornar o valor original se necessário
+        final_explicacao = []
+        for campo in top_campos:
+            if campo in ["Geography", "Gender"] and i < len(df_original):
+                final_explicacao.append(str(df_original.iloc[i][campo]))
+            else:
+                final_explicacao.append(campo)
+        
+        explicacoes.append(", ".join(final_explicacao))
+    return explicacoes
+
 def processar_csv(job_id: str, input_path: Path):
     try:
-        df = pd.read_csv(input_path)
+        output_path = TMP_DIR / f"{job_id}_resultado.csv"
+        chunk_size = 5000  # Processa 5k linhas por vez para economizar RAM
+        first_chunk = True
 
-        # Preparação
-        df_proc = preparar_dataframe(df)
-        X_scaled = artifacts["scaler"].transform(df_proc)
+        for chunk in pd.read_csv(input_path, chunksize=chunk_size):
+            # Preparação e Escalonamento
+            df_proc = preparar_dataframe(chunk)
+            X_scaled = artifacts["scaler"].transform(df_proc)
 
-        model = artifacts["model"]
-        threshold = artifacts["threshold_cost"]
+            # Predições
+            probs = artifacts["model"].predict_proba(X_scaled)[:, 1]
+            threshold = artifacts["threshold_cost"]
 
-        probs = model.predict_proba(X_scaled)[:, 1]
+            # Resultados do Chunk
+            chunk["probabilidade"] = probs.round(4)
+            chunk["nivel_risco"] = np.where(probs >= threshold, "ALTO", "BAIXO")
+            chunk["previsao"] = np.where(chunk["nivel_risco"] == "ALTO", "Vai cancelar", "Vai continuar")
+            
+            # Explicabilidade
+            chunk["explicabilidade"] = obter_explicabilidade_vetorizada(X_scaled, chunk)
 
-        df["probabilidade"] = probs.round(4)
-        df["nivel_risco"] = np.where(probs >= threshold, "ALTO", "BAIXO")
-        df["previsao"] = np.where(
-            df["nivel_risco"] == "ALTO",
-            "Vai cancelar",
-            "Vai continuar"
-        )
+            # Salva no CSV final (append mode se não for o primeiro chunk)
+            mode = 'w' if first_chunk else 'a'
+            header = True if first_chunk else False
+            chunk.to_csv(output_path, index=False, mode=mode, header=header)
+            first_chunk = False
 
-        output = TMP_DIR / f"{job_id}_resultado.csv"
-        df.to_csv(output, index=False)
+        # Limpeza do arquivo de entrada para liberar espaço no Render
+        if input_path.exists():
+            input_path.unlink()
 
     except Exception as e:
         (TMP_DIR / f"{job_id}.error").write_text(str(e))
@@ -243,7 +279,8 @@ def previsao_lote(
 @app.get("/previsao-lote/status/{job_id}")
 def status_lote(job_id: str):
     if (TMP_DIR / f"{job_id}.error").exists():
-        return {"status": "ERRO"}
+        erro_msg = (TMP_DIR / f"{job_id}.error").read_text()
+        return {"status": "ERRO", "detalhe": erro_msg}
     
     if (TMP_DIR / f"{job_id}_resultado.csv").exists():
         return {"status": "FINALIZADO"}
