@@ -207,20 +207,6 @@ def processar_csv(job_id: str, input_path: Path):
             "Vai continuar"
         )
 
-        explicabilidades = []
-
-        for i in range(len(df)):
-            payload = df.iloc[i].to_dict()
-
-            explic = calcular_explicabilidade_local(
-                X_scaled[i:i+1],
-                payload
-            )
-
-            explicabilidades.append(";".join(explic))
-
-        df["explicabilidade"] = explicabilidades
-
         output = TMP_DIR / f"{job_id}_resultado.csv"
         df.to_csv(output, index=False)
 
