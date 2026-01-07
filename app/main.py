@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import Dict, List
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse, Response
 import uuid
 import joblib
@@ -75,13 +75,13 @@ def favicon():
 # PREPARAÇÃO DE DADOS
 # =========================================================
 def preparar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    df = pd.get_dummies(df, columns=["Geography", "Gender"], drop_first=True)
+    df_proc = pd.get_dummies(df, columns=["Geography", "Gender"], drop_first=True)
     
     for col in artifacts["columns"]:
-        if col not in df.columns:
-            df[col] = 0
+        if col not in df_proc.columns:
+            df_proc[col] = 0
     
-    return df[artifacts["columns"]]
+    return df_proc[artifacts["columns"]]
 
 # =========================================================
 # MAPA DE FEATURES DO MODELO -> CONTRATO DA API
@@ -104,40 +104,32 @@ FEATURE_MAP = {
 # =========================================================
 # EXPLICABILIDADE LOCAL (TOP 3)
 # =========================================================
-def calcular_explicabilidade_local(
-    X_scaled: np.ndarray,
-    payload: Dict
-) -> list[str]:
+def calcular_explicabilidade_local(X_scaled: np.ndarray, payload: Dict) -> list[str]:
     model = artifacts["model"]
     features = artifacts["columns"]
     importances = model.feature_importances_
     impactos = importances * np.abs(X_scaled[0])
     
     impacto_por_contrato = {}
-    
     for feature, impacto in zip(features, impactos):
         campo = FEATURE_MAP.get(feature)
-        if not campo:
-            continue
-        
-        impacto_por_contrato[campo] = (
-            impacto_por_contrato.get(campo, 0) + impacto
-        )
+        if not campo: continue
+        impacto_por_contrato[campo] = impacto_por_contrato.get(campo, 0) + impacto
     
-    ranking = sorted(
-        impacto_por_contrato.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )[:3]
+    ranking = sorted(impacto_por_contrato.items(), key=lambda x: x[1], reverse=True)
     
     explicabilidade = []
-    
+    seen = set()
     for campo, _ in ranking:
-        if campo in ("Geography", "Gender"):
-            explicabilidade.append(payload[campo])
-        else:
-            explicabilidade.append(campo)
-    
+        if campo not in seen:
+            seen.add(campo)
+            if campo in ("Geography", "Gender"):
+                explicabilidade.append(str(payload[campo]))
+            else:
+                explicabilidade.append(campo)
+        if len(explicabilidade) == 3:
+            break
+            
     return explicabilidade
 
 # =========================================================
@@ -148,36 +140,22 @@ def previsao(payload: Dict):
     if not artifacts:
         raise HTTPException(status_code=503, detail="Modelo não carregado")
     
-    colunas = [
-        "CreditScore",
-        "Geography",
-        "Gender",
-        "Age",
-        "Tenure",
-        "Balance",
-        "EstimatedSalary",
-    ]
-    
-    faltantes = set(colunas) - set(payload.keys())
+    colunas_obrigatorias = ["CreditScore", "Geography", "Gender", "Age", "Tenure", "Balance", "EstimatedSalary"]
+    faltantes = set(colunas_obrigatorias) - set(payload.keys())
     if faltantes:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Colunas ausentes: {list(faltantes)}"
-        )
+        raise HTTPException(status_code=400, detail=f"Colunas ausentes: {list(faltantes)}")
     
     df = pd.DataFrame([payload])
     df_proc = preparar_dataframe(df)
     X_scaled = artifacts["scaler"].transform(df_proc)
     proba = float(artifacts["model"].predict_proba(X_scaled)[0, 1])
-    threshold = artifacts["threshold_cost"]
     
-    risco = "ALTO" if proba >= threshold else "BAIXO"
-    previsao = "Vai cancelar" if risco == "ALTO" else "Vai continuar"
-    
+    risco = "ALTO" if proba >= artifacts["threshold_cost"] else "BAIXO"
+    previsao_txt = "Vai cancelar" if risco == "ALTO" else "Vai continuar"
     explicabilidade = calcular_explicabilidade_local(X_scaled, payload)
     
     return {
-        "previsao": previsao,
+        "previsao": previsao_txt,
         "probabilidade": round(proba, 4),
         "nivel_risco": risco,
         "explicabilidade": explicabilidade
@@ -186,63 +164,58 @@ def previsao(payload: Dict):
 # =========================================================
 # PROCESSAMENTO EM BACKGROUND
 # =========================================================
-def obter_explicabilidade_vetorizada(X_scaled: np.ndarray, df_original: pd.DataFrame) -> List[str]:
-    """Calcula explicabilidade para múltiplas linhas de forma eficiente."""
+def obter_explicabilidade_lote(X_scaled: np.ndarray, chunk_df: pd.DataFrame) -> List[str]:
     model = artifacts["model"]
     features = artifacts["columns"]
     importances = model.feature_importances_
     
-    # Impacto = importância * valor absoluto dos dados escalonados
-    impactos = np.abs(X_scaled) * importances
-    nomes_amigaveis = np.array([FEATURE_MAP.get(f, f) for f in features])
+    impactos_matriz = np.abs(X_scaled) * importances
+    nomes_campos = np.array([FEATURE_MAP.get(f, f) for f in features])
     
-    explicacoes = []
-    for i in range(impactos.shape[0]):
-        # Pega os índices dos 3 maiores impactos
-        top_idx = np.argsort(impactos[i])[-3:][::-1]
-        top_campos = nomes_amigaveis[top_idx]
+    resultados = []
+    for i in range(impactos_matriz.shape[0]):
+        indices_decrescentes = np.argsort(impactos_matriz[i])[::-1]
         
-        # Ajuste para Geography/Gender retornar o valor original se necessário
-        final_explicacao = []
-        for campo in top_campos:
-            if campo in ["Geography", "Gender"] and i < len(df_original):
-                final_explicacao.append(str(df_original.iloc[i][campo]))
-            else:
-                final_explicacao.append(campo)
+        final_row_names = []
+        seen_features = set()
         
-        explicacoes.append(", ".join(final_explicacao))
-    return explicacoes
+        for idx in indices_decrescentes:
+            nome_amigavel = nomes_campos[idx]
+            if nome_amigavel not in seen_features:
+                seen_features.add(nome_amigavel)
+                if nome_amigavel in ["Geography", "Gender"]:
+                    val = str(chunk_df.iloc[i][nome_amigavel])
+                    final_row_names.append(val)
+                else:
+                    final_row_names.append(nome_amigavel)
+            
+            if len(final_row_names) == 3:
+                break
+        
+        resultados.append(", ".join(final_row_names))
+    return resultados
 
 def processar_csv(job_id: str, input_path: Path):
     try:
         output_path = TMP_DIR / f"{job_id}_resultado.csv"
-        chunk_size = 5000  # Processa 5k linhas por vez para economizar RAM
-        first_chunk = True
+        chunk_size = 5000 
+        is_first = True
 
         for chunk in pd.read_csv(input_path, chunksize=chunk_size):
-            # Preparação e Escalonamento
             df_proc = preparar_dataframe(chunk)
             X_scaled = artifacts["scaler"].transform(df_proc)
-
-            # Predições
+            
             probs = artifacts["model"].predict_proba(X_scaled)[:, 1]
             threshold = artifacts["threshold_cost"]
 
-            # Resultados do Chunk
             chunk["probabilidade"] = probs.round(4)
             chunk["nivel_risco"] = np.where(probs >= threshold, "ALTO", "BAIXO")
             chunk["previsao"] = np.where(chunk["nivel_risco"] == "ALTO", "Vai cancelar", "Vai continuar")
-            
-            # Explicabilidade
-            chunk["explicabilidade"] = obter_explicabilidade_vetorizada(X_scaled, chunk)
+            chunk["explicabilidade"] = obter_explicabilidade_lote(X_scaled, chunk)
 
-            # Salva no CSV final (append mode se não for o primeiro chunk)
-            mode = 'w' if first_chunk else 'a'
-            header = True if first_chunk else False
-            chunk.to_csv(output_path, index=False, mode=mode, header=header)
-            first_chunk = False
+            chunk.to_csv(output_path, mode='a', index=False, header=is_first)
+            is_first = False
 
-        # Limpeza do arquivo de entrada para liberar espaço no Render
         if input_path.exists():
             input_path.unlink()
 
@@ -253,10 +226,7 @@ def processar_csv(job_id: str, input_path: Path):
 # ENDPOINT /PREVISAO-LOTE
 # =========================================================
 @app.post("/previsao-lote")
-def previsao_lote(
-    file: UploadFile = File(...),
-    background_tasks: BackgroundTasks = BackgroundTasks()
-):
+def previsao_lote(file: UploadFile = File(...), background_tasks: BackgroundTasks = BackgroundTasks()):
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Arquivo deve ser CSV")
     
@@ -268,10 +238,7 @@ def previsao_lote(
     
     background_tasks.add_task(processar_csv, job_id, input_path)
     
-    return {
-        "job_id": job_id,
-        "status": "PROCESSANDO"
-    }
+    return {"job_id": job_id, "status": "PROCESSANDO"}
 
 # =========================================================
 # ENDPOINT /PREVISAO-LOTE/STATUS
@@ -279,8 +246,8 @@ def previsao_lote(
 @app.get("/previsao-lote/status/{job_id}")
 def status_lote(job_id: str):
     if (TMP_DIR / f"{job_id}.error").exists():
-        erro_msg = (TMP_DIR / f"{job_id}.error").read_text()
-        return {"status": "ERRO", "detalhe": erro_msg}
+        erro = (TMP_DIR / f"{job_id}.error").read_text()
+        return {"status": "ERRO", "detalhe": erro}
     
     if (TMP_DIR / f"{job_id}_resultado.csv").exists():
         return {"status": "FINALIZADO"}
@@ -293,12 +260,6 @@ def status_lote(job_id: str):
 @app.get("/previsao-lote/download/{job_id}")
 def download(job_id: str):
     path = TMP_DIR / f"{job_id}_resultado.csv"
-    
     if not path.exists():
         raise HTTPException(status_code=404, detail="Arquivo não disponível")
-    
-    return FileResponse(
-        path,
-        filename=path.name,
-        media_type="text/csv"
-    )
+    return FileResponse(path, filename=path.name, media_type="text/csv")
