@@ -19,7 +19,7 @@ TMP_DIR = Path(tempfile.gettempdir())
 # =========================================================
 # APP
 # =========================================================
-app = FastAPI(title="Churn API", version="2.0.0")
+app = FastAPI(title="Churn API", version="9.6.0")
 artifacts: Dict = {}
 
 # =========================================================
@@ -50,7 +50,7 @@ def root():
         "service": "Churn API",
         "status": "online",
         "model_loaded": bool(artifacts),
-        "version": "2.0.0",
+        "version": "9.6.0",
         "environment": "render"
     }
 
@@ -152,7 +152,10 @@ def previsao(payload: Dict):
     
     risco = "ALTO" if proba >= artifacts["threshold_cost"] else "BAIXO"
     previsao_txt = "Vai cancelar" if risco == "ALTO" else "Vai continuar"
-    explicabilidade = calcular_explicabilidade_local(X_scaled, payload)
+    
+    explicabilidade = []
+    if previsao_txt == "Vai cancelar":
+        explicabilidade = calcular_explicabilidade_local(X_scaled, payload)
     
     return {
         "previsao": previsao_txt,
@@ -164,7 +167,7 @@ def previsao(payload: Dict):
 # =========================================================
 # PROCESSAMENTO EM BACKGROUND
 # =========================================================
-def obter_explicabilidade_lote(X_scaled: np.ndarray, chunk_df: pd.DataFrame) -> List[str]:
+def obter_explicabilidade_lote(X_scaled: np.ndarray, chunk_df: pd.DataFrame, mask_cancelar: np.ndarray) -> List[str]:
     model = artifacts["model"]
     features = artifacts["columns"]
     importances = model.feature_importances_
@@ -174,8 +177,11 @@ def obter_explicabilidade_lote(X_scaled: np.ndarray, chunk_df: pd.DataFrame) -> 
     
     resultados = []
     for i in range(impactos_matriz.shape[0]):
+        if not mask_cancelar[i]:
+            resultados.append("")
+            continue
+
         indices_decrescentes = np.argsort(impactos_matriz[i])[::-1]
-        
         final_row_names = []
         seen_features = set()
         
@@ -209,9 +215,11 @@ def processar_csv(job_id: str, input_path: Path):
             threshold = artifacts["threshold_cost"]
 
             chunk["probabilidade"] = probs.round(4)
-            chunk["nivel_risco"] = np.where(probs >= threshold, "ALTO", "BAIXO")
-            chunk["previsao"] = np.where(chunk["nivel_risco"] == "ALTO", "Vai cancelar", "Vai continuar")
-            chunk["explicabilidade"] = obter_explicabilidade_lote(X_scaled, chunk)
+            mask_alto = probs >= threshold
+            chunk["nivel_risco"] = np.where(mask_alto, "ALTO", "BAIXO")
+            chunk["previsao"] = np.where(mask_alto, "Vai cancelar", "Vai continuar")
+            
+            chunk["explicabilidade"] = obter_explicabilidade_lote(X_scaled, chunk, mask_alto)
 
             chunk.to_csv(output_path, mode='a', index=False, header=is_first)
             is_first = False
