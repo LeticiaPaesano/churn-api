@@ -19,26 +19,42 @@ TMP_DIR = Path(tempfile.gettempdir())
 # =========================================================
 # APP
 # =========================================================
-app = FastAPI(title="Churn API", version="9.6.0")
+app = FastAPI(title="Churn API", version="2.0.0")
 artifacts: Dict = {}
+model_loaded = False
 
 # =========================================================
 # STARTUP
 # =========================================================
 @app.on_event("startup")
 def load_artifacts():
+    global model_loaded
     if not MODEL_PATH.exists():
         raise RuntimeError(f"Modelo não encontrado em {MODEL_PATH}")
-    
+
     loaded = joblib.load(MODEL_PATH)
-    required = {"model", "scaler", "threshold_cost", "columns"}
+
+    if "threshold" in loaded:
+        loaded["threshold_cost"] = loaded["threshold"]
+
+    required = {
+        "model", 
+        "scaler", 
+        "columns", 
+        "threshold_cost", 
+        "balance_median",
+        "salary_median"
+    }
+
     missing = required - set(loaded.keys())
-    
     if missing:
-        raise RuntimeError(f"Artefatos faltando no model.joblib: {missing}")
-    
+        raise RuntimeError(f"Erro: Faltam chaves no model.joblib: {missing}")
+
     artifacts.update(loaded)
-    print("✅ Modelo carregado com sucesso")
+    model_loaded = True
+    
+    print("✅ Artefatos carregados com sucesso!")
+    print(f"📌 Threshold: {artifacts['threshold_cost']} | Colunas: {len(artifacts['columns'])}")
 
 # =========================================================
 # ENDPOINT / e /HEAD
@@ -49,8 +65,8 @@ def root():
     return {
         "service": "Churn API",
         "status": "online",
-        "model_loaded": bool(artifacts),
-        "version": "9.6.0",
+        "model_loaded": model_loaded,
+        "version": "2.0.0",
         "environment": "render"
     }
 
@@ -61,7 +77,7 @@ def root():
 def health():
     return {
         "status": "ok",
-        "model_loaded": bool(artifacts)
+        "model_loaded": model_loaded
     }
 
 # =========================================================
@@ -137,7 +153,7 @@ def calcular_explicabilidade_local(X_scaled: np.ndarray, payload: Dict) -> list[
 # =========================================================
 @app.post("/previsao")
 def previsao(payload: Dict):
-    if not artifacts:
+    if not model_loaded:
         raise HTTPException(status_code=503, detail="Modelo não carregado")
     
     colunas_obrigatorias = ["CreditScore", "Geography", "Gender", "Age", "Tenure", "Balance", "EstimatedSalary"]
@@ -207,6 +223,9 @@ def processar_csv(job_id: str, input_path: Path):
         chunk_size = 5000 
         is_first = True
 
+        if not input_path.exists():
+            raise FileNotFoundError("Arquivo de entrada não encontrado")
+
         for chunk in pd.read_csv(input_path, chunksize=chunk_size):
             df_proc = preparar_dataframe(chunk)
             X_scaled = artifacts["scaler"].transform(df_proc)
@@ -228,7 +247,8 @@ def processar_csv(job_id: str, input_path: Path):
             input_path.unlink()
 
     except Exception as e:
-        (TMP_DIR / f"{job_id}.error").write_text(str(e))
+        error_file = TMP_DIR / f"{job_id}.error"
+        error_file.write_text(str(e))
 
 # =========================================================
 # ENDPOINT /PREVISAO-LOTE
