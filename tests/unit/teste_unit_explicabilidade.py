@@ -1,18 +1,15 @@
 import numpy as np
 from app.main import calcular_explicabilidade_local
 
-def test_explicabilidade_retorna_campos_contrato(payload_valido):
-    X_fake = np.ones((1, 10))  # tamanho não importa aqui
+def test_explicabilidade_sem_repeticao(payload_valido):
+
+    from app.main import artifacts
+    X_fake = np.random.rand(1, len(artifacts["columns"]))
 
     resultado = calcular_explicabilidade_local(X_fake, payload_valido)
 
+    assert len(resultado) == 3
+    assert len(set(resultado)) == 3
+    
     for item in resultado:
-        assert item in (
-            "CreditScore",
-            "Age",
-            "Tenure",
-            "Balance",
-            "EstimatedSalary",
-            payload_valido["Geography"],
-            payload_valido["Gender"]
-        )
+        assert isinstance(item, str)

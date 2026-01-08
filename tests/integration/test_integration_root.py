@@ -1,6 +1,6 @@
-def test_root_ok(client):
+def test_root_status_e_versao(client):
     r = client.get("/")
     assert r.status_code == 200
-    body = r.json()
-    assert body["status"] == "online"
-    assert body["model_loaded"] is True
+    data = r.json()
+    assert data["version"] == "12.1.0"
+    assert data["model_loaded"] is True

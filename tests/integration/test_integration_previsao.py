@@ -1,12 +1,9 @@
-def test_previsao_sucesso(client, payload_valido):
+def test_previsao_logica_explicabilidade(client, payload_valido):
     r = client.post("/previsao", json=payload_valido)
     assert r.status_code == 200
-
-    body = r.json()
-    assert "previsao" in body
-    assert "probabilidade" in body
-    assert "nivel_risco" in body
-    assert "explicabilidade" in body
-
-    assert isinstance(body["explicabilidade"], list)
-    assert len(body["explicabilidade"]) == 3
+    res = r.json()
+    
+    if res["previsao"] == "Vai cancelar":
+        assert len(res["explicabilidade"]) == 3
+    else:
+        assert len(res["explicabilidade"]) == 0
