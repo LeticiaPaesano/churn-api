@@ -105,34 +105,44 @@ As tecnologias previstas incluem:
 <h2 id="estrutura" align="center">Estrutura do Repositório</h2>
 
 ```plaintext
-app/
-└── models/
-| └── model.joblib                # Pipeline de ML (Modelo + Scaler)
-├── __init__.py
-└── main.py                       # API FastAPI
+app/                      
+├── models/
+│   ├── __init__.py           
+│   ├── model.joblib        # Modelo serializado         
+└── main.py                 # API FastAPI
 
-data/
-├── Churn.csv                     # Dados brutos (origem)
-└── dataset.parquet               # Dados tratados (pós-EDA e features)
+data/                       
+├── Churn.csv               # Dados brutos
+└── dataset.parquet         # Dados tratados
 
-notebooks/
-└── Churn_Hackathon.ipynb         # EDA + Modelagem
+docs/                       
+└── Documentação Técnica de Visualizações.md  # Gráficos e análises
 
-tests/
-├── __init__.py
-├── conftest.py
-├── stress_test.py
-├── test_api.py
-├── test_health.py
-├── test_integration_previsao.py
-├── test_unit_utils.py
-└── teste_unit_explicabilidade.py
+notebooks/                  
+└── Churn_Hackathon.ipynb   # EDA e modelagem
 
+tests/                      
+├── integration/            
+│   ├── __init__.py
+│   ├── test_integration_health.py
+│   ├── test_integration_previsao.py
+│   └── test_integration_root.py
+└── unit/                   
+    ├── __init__.py
+    ├── test_unit_payload.py
+    ├── test_unit_previsao_lote.py
+    └── teste_unit_explicabilidade.py
+
+__init__.py
 .gitignore
 Dockerfile
+LICENSE
 README.md
+check_all.sh                # Script de validação total
+conftest.py
 docker-compose.yml
-requirements.txt
+requirements.txt                   
+stress_test.py    
 ```
 
 <p align="right"><a href="#inicio">⬆️ Voltar ao início</a></p>
